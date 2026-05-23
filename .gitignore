@@ -1,0 +1,18 @@
+# Maven
+target/
+*.jar
+*.war
+*.ear
+*.class
+ECHO is on.
+# IDE
+.idea/
+*.iml
+.vscode/
+ECHO is on.
+# OS
+.DS_Store
+Thumbs.db
+ECHO is on.
+# Logs
+*.log
