@@ -238,6 +238,14 @@ public class DNAService {
         viewPort.addDNAFragment(spliced, spliced.getX(), spliced.getY(), spliced.getBasePairs(), false,
             () -> toggleSelection(spliced), () -> updateFragmentPosition(spliced));
 
+        double alignmentScore = LongestCommonSubsequence.alignmentScore(
+                fragment1.getBasePairs(), fragment2.getBasePairs());
+        viewPort.updateAlgorithmInsight(String.format(
+                "LCS produced %d bp; alignment score=%.2f (min %.2f)",
+                alignedSequence.length(),
+                alignmentScore,
+                Config.DNA_ALIGNMENT_SCORE_THRESHOLD));
+
         int proteinCount = Config.RAND.nextInt(5) + 1;
         for (int i = 0; i < proteinCount; i++) {
             String enzymeType = viewPort.promptForEnzymeType();

@@ -1,5 +1,6 @@
 package com.xai.dnareplicator.controller;
 
+import com.xai.dnareplicator.application.TutorialService;
 import com.xai.dnareplicator.algorithm.graph.BreadthFirstInfection;
 import com.xai.dnareplicator.algorithm.graph.DijkstraPathfinder;
 import com.xai.dnareplicator.config.Config;
@@ -30,11 +31,13 @@ public class InfectionEngine {
     private Level level;
     private VirologyModel virologyModel;
     private final ObjectMapper objectMapper;
+    private final TutorialService tutorialService;
 
     public InfectionEngine(
             SimulationViewPort viewPort,
             InfectionAnimationDriver animationDriver,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            TutorialService tutorialService) {
         if (viewPort == null) {
             throw new IllegalArgumentException("SimulationViewPort cannot be null");
         }
@@ -51,6 +54,7 @@ public class InfectionEngine {
         this.virologyModel = new VirologyModel();
         this.objectMapper = objectMapper.copy()
                 .enable(SerializationFeature.INDENT_OUTPUT);
+        this.tutorialService = tutorialService;
         updateLevelAndVirology();
     }
 
@@ -198,10 +202,12 @@ public class InfectionEngine {
             List<Cell> path = findOptimalInfectionPath(cells.get(0), targetCell);
             if (path.isEmpty()) {
                 viewPort.updateStatus("No valid infection path found!");
+                viewPort.updateAlgorithmInsight("Dijkstra found no path to target cell.");
                 isSimulating = false;
                 animationDriver.stop();
                 return;
             }
+            viewPort.updateAlgorithmInsight("Dijkstra path: " + path.size() + " cells to target.");
 
             Cell nextCell = path.get(Math.min(path.indexOf(cells.get(0)) + 1, path.size() - 1));
             double dx = nextCell.getX() - virus.getX();
@@ -215,6 +221,9 @@ public class InfectionEngine {
                     try {
                         List<Cell> infectedCells = simulateInfectionBFS(nextCell, virus);
                         viewPort.updateStatus("Infected " + infectedCells.size() + " cells!");
+                        viewPort.updateAlgorithmInsight(
+                                "BFS spread to " + infectedCells.size() + " cells from entry point.");
+                        tutorialService.onInfectionSimulated();
                         if (infectedCells.contains(targetCell)) {
                             targetCell.compromise();
                             viewPort.updateCell(targetCell, true);

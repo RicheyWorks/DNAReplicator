@@ -62,5 +62,9 @@ public interface SimulationViewPort {
 
     void updateInfectionHistory(List<Boolean> history);
 
+    void updateAlgorithmInsight(String insight);
+
+    void updateTutorial(String stepTitle, String stepBody);
+
     void clearAll();
 }

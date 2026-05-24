@@ -38,6 +38,8 @@ public class SimulationView implements SimulationViewPort {
     private Label virologyLabel;
     private Label virusLabel;
     private Label mutationLabel;
+    private Label tutorialLabel;
+    private Label insightLabel;
     private Slider mutationSlider;
     private ProgressBar foldingProgress;
     private Map<Object, Group> dnaFragmentNodes;
@@ -143,6 +145,24 @@ public class SimulationView implements SimulationViewPort {
         statusLabel.setLayoutX(10);
         statusLabel.setLayoutY(10);
         root.getChildren().add(statusLabel);
+
+        tutorialLabel = new Label("Tutorial");
+        tutorialLabel.setFont(new Font("Arial", 14));
+        tutorialLabel.setTextFill(Color.LIGHTYELLOW);
+        tutorialLabel.setWrapText(true);
+        tutorialLabel.setPrefWidth(300);
+        tutorialLabel.setLayoutX(480);
+        tutorialLabel.setLayoutY(10);
+        root.getChildren().add(tutorialLabel);
+
+        insightLabel = new Label("Algorithm insight will appear here.");
+        insightLabel.setFont(new Font("Arial", 13));
+        insightLabel.setTextFill(Color.LIGHTGREEN);
+        insightLabel.setWrapText(true);
+        insightLabel.setPrefWidth(300);
+        insightLabel.setLayoutX(480);
+        insightLabel.setLayoutY(120);
+        root.getChildren().add(insightLabel);
 
         // Level Label
         levelLabel = new Label("Level: 1");
@@ -251,6 +271,20 @@ public class SimulationView implements SimulationViewPort {
     public void updateStatus(String message) {
         statusLabel.setText(message);
         playSound("click.wav");
+    }
+
+    @Override
+    public void updateAlgorithmInsight(String insight) {
+        if (insight == null || insight.isBlank()) {
+            insightLabel.setText("Algorithm insight will appear here.");
+        } else {
+            insightLabel.setText("Insight: " + insight);
+        }
+    }
+
+    @Override
+    public void updateTutorial(String stepTitle, String stepBody) {
+        tutorialLabel.setText(stepTitle + "\n" + stepBody);
     }
 
     public void updateLevel(int level) {

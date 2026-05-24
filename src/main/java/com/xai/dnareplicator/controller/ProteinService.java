@@ -1,5 +1,6 @@
 package com.xai.dnareplicator.controller;
 
+import com.xai.dnareplicator.application.TutorialService;
 import com.xai.dnareplicator.application.protein.FoldingResult;
 import com.xai.dnareplicator.application.protein.ProteinFoldingOrchestrator;
 import com.xai.dnareplicator.model.Protein;
@@ -22,12 +23,14 @@ public class ProteinService {
     private final SimulationViewPort viewPort;
     private final JavaFxExecutor javaFxExecutor;
     private final ProteinFoldingOrchestrator foldingOrchestrator;
+    private final TutorialService tutorialService;
 
     public ProteinService(
             SimulationSession session,
             SimulationViewPort viewPort,
             JavaFxExecutor javaFxExecutor,
-            ProteinFoldingOrchestrator foldingOrchestrator) {
+            ProteinFoldingOrchestrator foldingOrchestrator,
+            TutorialService tutorialService) {
         if (session == null) {
             throw new IllegalArgumentException("SimulationSession cannot be null");
         }
@@ -40,10 +43,14 @@ public class ProteinService {
         if (foldingOrchestrator == null) {
             throw new IllegalArgumentException("ProteinFoldingOrchestrator cannot be null");
         }
+        if (tutorialService == null) {
+            throw new IllegalArgumentException("TutorialService cannot be null");
+        }
         this.proteins = session.getProteins();
         this.viewPort = viewPort;
         this.javaFxExecutor = javaFxExecutor;
         this.foldingOrchestrator = foldingOrchestrator;
+        this.tutorialService = tutorialService;
     }
 
     public void foldProteins() throws DNAProcessingException {
@@ -77,6 +84,8 @@ public class ProteinService {
 
                 javaFxExecutor.runLater(() -> {
                     try {
+                        String lastInsight = "";
+                        boolean anyFolded = false;
                         for (Protein protein : proteins) {
                             if (protein == null) {
                                 viewPort.updateStatus("Skipping null protein!");
@@ -84,12 +93,24 @@ public class ProteinService {
                             }
                             FoldingResult result = foldingOrchestrator.foldProtein(protein);
                             viewPort.updateStatus(result.statusMessage());
+                            if (result.algorithmInsight() != null && !result.algorithmInsight().isBlank()) {
+                                lastInsight = result.algorithmInsight();
+                            }
+                            if (protein.isFolded()) {
+                                anyFolded = true;
+                            }
                             viewPort.updateProtein(
                                     protein,
                                     protein.getX(),
                                     protein.getY(),
                                     protein.isFolded(),
                                     protein.isFoldFailed());
+                        }
+                        if (!lastInsight.isBlank()) {
+                            viewPort.updateAlgorithmInsight(lastInsight);
+                        }
+                        if (anyFolded) {
+                            tutorialService.onFoldCompleted();
                         }
                         viewPort.hideFoldingProgress();
                         long foldedCount = proteins.stream().filter(p -> p != null && p.isFolded()).count();

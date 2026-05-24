@@ -6,10 +6,14 @@ import com.xai.dnareplicator.algorithm.protein.AminoAcidSplayTree;
 import com.xai.dnareplicator.algorithm.protein.FibonacciBondHeap;
 import com.xai.dnareplicator.algorithm.protein.FoldingConstraintSolver;
 import com.xai.dnareplicator.algorithm.protein.FoldingHmm;
+import com.xai.dnareplicator.algorithm.protein.FoldingPathwayScorer;
+import com.xai.dnareplicator.algorithm.protein.GeneticFoldingStrategy;
 import com.xai.dnareplicator.algorithm.protein.KolmogorovFoldingEstimate;
 import com.xai.dnareplicator.algorithm.protein.MctsFoldingEvaluator;
 import com.xai.dnareplicator.algorithm.protein.MutationPathwayTree;
+import com.xai.dnareplicator.algorithm.protein.PathwayBondFactory;
 import com.xai.dnareplicator.algorithm.protein.ProteinFoldingConstants;
+import com.xai.dnareplicator.algorithm.protein.SimulatedAnnealingStrategy;
 import com.xai.dnareplicator.config.Config;
 import com.xai.dnareplicator.controller.DNAProcessingException;
 import com.xai.dnareplicator.domain.protein.AminoAcid;
@@ -35,6 +39,8 @@ public class ProteinFoldingOrchestrator {
     private final MutationPathwayTree mutationTree = new MutationPathwayTree();
     private final List<FoldingPathway> successfulPathways = new ArrayList<>();
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final GeneticFoldingStrategy geneticStrategy;
+    private final SimulatedAnnealingStrategy annealingStrategy;
     private double chaperoneLevel = 1.0;
 
     public ProteinFoldingOrchestrator(ObjectMapper objectMapper) {
@@ -42,6 +48,8 @@ public class ProteinFoldingOrchestrator {
             throw new IllegalArgumentException("ObjectMapper cannot be null");
         }
         this.objectMapper = objectMapper.copy().enable(SerializationFeature.INDENT_OUTPUT);
+        this.geneticStrategy = new GeneticFoldingStrategy(executor);
+        this.annealingStrategy = new SimulatedAnnealingStrategy(executor);
     }
 
     public FoldingResult foldProtein(Protein protein) throws DNAProcessingException {
@@ -63,18 +71,19 @@ public class ProteinFoldingOrchestrator {
         boolean kcSuccess = kc.estimateFoldingDifficulty(sequence) <= 0.8;
         List<ProteinBond> approxBonds = approximateProteinFolding(aminoAcids);
         boolean approxSuccess = approxBonds.stream().mapToDouble(ProteinBond::getEnergy).sum() <= Config.BOND_ENERGY_THRESHOLD;
-        boolean noetherSuccess = checkNoetherSymmetry(approxBonds);
+        boolean noetherSuccess = FoldingPathwayScorer.checkNoetherSymmetry(approxBonds);
         String foldingState = foldingHMM.predictFoldingState(sequence);
         boolean hmmSuccess = !"coil".equals(foldingState);
-        List<FoldingPathway> gaPopulation = runParallelGeneticAlgorithm(aminoAcids);
+        GeneticFoldingStrategy.PathwayMutationListener listener = mutationTree::addPathway;
+        List<FoldingPathway> gaPopulation = geneticStrategy.evolve(aminoAcids, listener);
         FoldingPathway gaPathway = gaPopulation.stream().max(Comparator.comparingDouble(FoldingPathway::getCompositeScore)).orElse(gaPopulation.get(0));
         boolean gaSuccess = gaPathway.getCompositeScore() >= 0.5;
-        List<FoldingPathway> saPopulation = runParallelSimulatedAnnealing(aminoAcids);
+        List<FoldingPathway> saPopulation = annealingStrategy.anneal(aminoAcids, listener);
         FoldingPathway saPathway = saPopulation.stream().max(Comparator.comparingDouble(FoldingPathway::getCompositeScore)).orElse(saPopulation.get(0));
         boolean saSuccess = saPathway.getCompositeScore() >= 0.5;
         MctsFoldingEvaluator mcts = new MctsFoldingEvaluator(successfulPathways);
-        boolean mctsSuccess = mcts.evaluatePathway(gaPathway, computePossibleBonds(aminoAcids)) >= 0.5;
-        boolean entropySuccess = calculateFoldingEntropy(Arrays.asList(gaPathway, saPathway)) >= 0.5;
+        boolean mctsSuccess = mcts.evaluatePathway(gaPathway, PathwayBondFactory.computePossibleBonds(aminoAcids)) >= 0.5;
+        boolean entropySuccess = FoldingPathwayScorer.calculateFoldingEntropy(Arrays.asList(gaPathway, saPathway)) >= 0.5;
         FoldingConstraintSolver csp = new FoldingConstraintSolver();
         List<ProteinBond> constrainedBonds = csp.propagateConstraints(approxBonds, 5);
         boolean cspSuccess = !constrainedBonds.isEmpty() && constrainedBonds.size() >= approxBonds.size() * 0.8;
@@ -88,14 +97,29 @@ public class ProteinFoldingOrchestrator {
             mutationTree.addPathway(saPathway, gaPathway, "Annealing");
             mutationTree.seedNewPathway(gaPathway);
             chaperoneLevel = Math.max(0.5, chaperoneLevel * 0.95);
-            return new FoldingResult(true, foldingState, "Protein " + protein.getEnzymeType() + " folded as " + foldingState);
+            String insight = buildInsight(foldingState, gaPathway, saPathway, mctsSuccess, entropySuccess);
+            return new FoldingResult(true, foldingState,
+                    "Protein " + protein.getEnzymeType() + " folded as " + foldingState, insight);
         }
         protein.failFold();
         mutationTree.addPathway(gaPathway, null, "FailedFold");
         mutationTree.addPathway(saPathway, gaPathway, "Annealing");
         chaperoneLevel = Math.min(1.5, chaperoneLevel * 1.05);
         mutationTree.visualize();
-        return new FoldingResult(false, foldingState, "Protein " + protein.getEnzymeType() + " failed to fold!");
+        String insight = buildInsight(foldingState, gaPathway, saPathway, mctsSuccess, entropySuccess);
+        return new FoldingResult(false, foldingState,
+                "Protein " + protein.getEnzymeType() + " failed to fold!", insight);
+    }
+
+    private String buildInsight(String foldingState, FoldingPathway gaPathway, FoldingPathway saPathway,
+                                boolean mctsSuccess, boolean entropySuccess) {
+        return String.format(
+                "HMM=%s | GA score=%.2f | SA score=%.2f | MCTS=%s | entropy=%s",
+                foldingState,
+                gaPathway.getCompositeScore(),
+                saPathway.getCompositeScore(),
+                mctsSuccess ? "ok" : "low",
+                entropySuccess ? "ok" : "low");
     }
 
     // CLRS Chapter 35: Greedy approximation with Fibonacci Heap and CSP
@@ -107,7 +131,7 @@ public class ProteinFoldingOrchestrator {
             throw new DNAProcessingException("Too many amino acids: " + aminoAcids.size());
         }
 
-        List<ProteinBond> possibleBonds = computePossibleBonds(aminoAcids);
+        List<ProteinBond> possibleBonds = PathwayBondFactory.computePossibleBonds(aminoAcids);
         // Apply constraint propagation (Knuth/CSP)
         FoldingConstraintSolver csp = new FoldingConstraintSolver();
         possibleBonds = csp.propagateConstraints(possibleBonds, 5); // Max direction imbalance = 5
@@ -181,247 +205,6 @@ public class ProteinFoldingOrchestrator {
         // Calculate Boltzmann probability: P = e^(-E/kT) / Z
         double probability = Math.exp(-selectedEnergy / ProteinFoldingConstants.KT) / Z;
         return Math.max(0.0, Math.min(1.0, probability));
-    }
-
-    // Noether-inspired symmetry check
-    private boolean checkNoetherSymmetry(List<ProteinBond> bonds) {
-        if (bonds == null || bonds.isEmpty()) {
-            return false;
-        }
-        int leftBias = (int) bonds.stream().filter(b -> "L".equals(b.getDirection())).count();
-        int rightBias = (int) bonds.stream().filter(b -> "R".equals(b.getDirection())).count();
-        int totalBonds = bonds.size();
-        double symmetryScore = totalBonds == 0 ? 0 : 1.0 - Math.abs(leftBias - rightBias) / (double) totalBonds;
-        return symmetryScore >= 0.8;
-    }
-
-    // Shannon-inspired entropy calculation (MacKay)
-    private double calculateFoldingEntropy(List<FoldingPathway> pathways) {
-        if (pathways == null || pathways.isEmpty()) {
-            return 0.0;
-        }
-        Map<String, Integer> configCounts = new HashMap<>();
-        for (FoldingPathway pathway : pathways) {
-            String config = pathway.getBonds().stream()
-                .map(b -> b.getAminoAcid1().getId() + "-" + b.getAminoAcid2().getId())
-                .sorted()
-                .collect(Collectors.joining(","));
-            configCounts.put(config, configCounts.getOrDefault(config, 0) + 1);
-        }
-
-        double entropy = 0.0;
-        int total = pathways.size();
-        for (int count : configCounts.values()) {
-            double p = count / (double) total;
-            entropy -= p * Math.log(p) / Math.log(2); // Shannon entropy in bits
-        }
-        double maxEntropy = Math.log(pathways.size()) / Math.log(2);
-        return maxEntropy == 0 ? 0 : entropy / maxEntropy;
-    }
-
-    // Gauss-inspired fitness normalization
-    private void normalizeFitness(List<FoldingPathway> pathways) {
-        if (pathways == null || pathways.isEmpty()) {
-            return;
-        }
-        double mean = pathways.stream().mapToDouble(FoldingPathway::getFitness).average().orElse(0.0);
-        double variance = pathways.stream()
-            .mapToDouble(p -> Math.pow(p.getFitness() - mean, 2))
-            .average()
-            .orElse(0.0);
-        double stdDev = Math.sqrt(variance);
-
-        for (FoldingPathway pathway : pathways) {
-            double fitness = pathway.getFitness();
-            double normalized = stdDev == 0 ? 0.5 : (fitness - mean) / (2 * stdDev) + 0.5;
-            pathway.setNormalizedFitness(Math.max(0, Math.min(1, normalized)));
-        }
-    }
-
-    // Advanced composite scoring (Alberts, Dayan & Abbott)
-    private void computeCompositeScore(List<FoldingPathway> pathways, double entropy) {
-        if (pathways == null || pathways.isEmpty()) {
-            return;
-        }
-        double energyWeight = 0.4;
-        double symmetryWeight = 0.3;
-        double entropyWeight = 0.2;
-        double plausibilityWeight = 0.1;
-
-        for (FoldingPathway pathway : pathways) {
-            double energyScore = pathway.getNormalizedFitness();
-            double symmetryScore = checkNoetherSymmetry(pathway.getBonds()) ? 1.0 : 0.5;
-            double entropyScore = entropy;
-            double plausibilityScore = estimateBiologicalPlausibility(pathway);
-            double compositeScore = energyWeight * energyScore +
-                                   symmetryWeight * symmetryScore +
-                                   entropyWeight * entropyScore +
-                                   plausibilityWeight * plausibilityScore;
-            pathway.setCompositeScore(Math.max(0, Math.min(1, compositeScore)));
-        }
-    }
-
-    // Simplified biological plausibility (Alberts-inspired)
-    private double estimateBiologicalPlausibility(FoldingPathway pathway) {
-        double meanEnergy = pathway.getBonds().stream().mapToDouble(ProteinBond::getEnergy).average().orElse(0.0);
-        double variance = pathway.getBonds().stream()
-            .mapToDouble(b -> Math.pow(b.getEnergy() - meanEnergy, 2))
-            .average()
-            .orElse(0.0);
-        return variance == 0 ? 0.5 : Math.exp(-variance / Config.BOND_ENERGY_THRESHOLD);
-    }
-
-    // Parallel genetic algorithm
-    private List<FoldingPathway> runParallelGeneticAlgorithm(List<AminoAcid> aminoAcids) throws DNAProcessingException {
-        if (aminoAcids == null || aminoAcids.isEmpty()) {
-            throw new DNAProcessingException("No amino acids for genetic algorithm!");
-        }
-
-        int populationSize = 50;
-        List<FoldingPathway> population = new ArrayList<>();
-        List<ProteinBond> possibleBonds = computePossibleBonds(aminoAcids);
-        for (int i = 0; i < populationSize; i++) {
-            List<ProteinBond> randomBonds = new ArrayList<>();
-            int bondCount = Config.RAND.nextInt(possibleBonds.size() / 2) + 1;
-            Collections.shuffle(possibleBonds, Config.RAND);
-            for (int j = 0; j < bondCount && j < possibleBonds.size(); j++) {
-                randomBonds.add(possibleBonds.get(j));
-            }
-            population.add(new FoldingPathway(randomBonds));
-        }
-
-        int generations = 20;
-        for (int gen = 0; gen < generations; gen++) {
-            normalizeFitness(population); // Gauss: Normalize fitness
-            double entropy = calculateFoldingEntropy(population); // Shannon/MacKay
-            computeCompositeScore(population, entropy); // Advanced scoring
-            population.sort((p1, p2) -> Double.compare(p2.getCompositeScore(), p1.getCompositeScore()));
-            List<FoldingPathway> newPopulation = new ArrayList<>(population.subList(0, populationSize / 2));
-
-            List<Future<FoldingPathway>> futures = new ArrayList<>();
-
-// ✅ FIX: create effectively final copy
-List<FoldingPathway> currentPopulation = population;
-
-for (int i = newPopulation.size(); i < populationSize; i++) {
-    futures.add(executor.submit(() -> {
-        FoldingPathway parent1 = currentPopulation.get(Config.RAND.nextInt(populationSize / 2));
-        FoldingPathway parent2 = currentPopulation.get(Config.RAND.nextInt(populationSize / 2));
-                    FoldingPathway child = crossover(parent1, parent2);
-                    if (Config.RAND.nextDouble() < 0.1) {
-                        child = mutate(child, possibleBonds);
-                    }
-                    mutationTree.addPathway(child, parent1, Config.RAND.nextDouble() < 0.5 ? "Crossover" : "Mutation");
-                    return child;
-                }));
-            }
-
-            for (Future<FoldingPathway> future : futures) {
-                try {
-                    newPopulation.add(future.get());
-                } catch (InterruptedException | ExecutionException e) {
-                    throw new DNAProcessingException("Parallel genetic algorithm failed: " + e.getMessage());
-                }
-            }
-            population = newPopulation;
-        }
-        normalizeFitness(population); // Gauss: Final normalization
-        computeCompositeScore(population, calculateFoldingEntropy(population)); // Final scoring
-        return population;
-    }
-
-    // Parallel simulated annealing
-    private List<FoldingPathway> runParallelSimulatedAnnealing(List<AminoAcid> aminoAcids) throws DNAProcessingException {
-        if (aminoAcids == null || aminoAcids.isEmpty()) {
-            throw new DNAProcessingException("No amino acids for simulated annealing!");
-        }
-
-        List<ProteinBond> possibleBonds = computePossibleBonds(aminoAcids);
-        List<Future<FoldingPathway>> futures = new ArrayList<>();
-        int numRuns = 10; // Number of parallel annealing runs
-
-        for (int i = 0; i < numRuns; i++) {
-            futures.add(executor.submit(() -> {
-                List<ProteinBond> currentBonds = new ArrayList<>();
-                int initialBondCount = Config.RAND.nextInt(possibleBonds.size() / 2) + 1;
-                Collections.shuffle(possibleBonds, Config.RAND);
-                for (int j = 0; j < initialBondCount && j < possibleBonds.size(); j++) {
-                    currentBonds.add(possibleBonds.get(j));
-                }
-                FoldingPathway currentPathway = new FoldingPathway(currentBonds);
-                FoldingPathway bestPathway = currentPathway;
-
-                double temperature = 1000.0;
-                double coolingRate = 0.95;
-                int iterations = 100;
-
-                for (int k = 0; k < iterations; k++) {
-                    List<ProteinBond> neighborBonds = new ArrayList<>(currentBonds);
-                    if (!neighborBonds.isEmpty() && Config.RAND.nextDouble() < 0.5) {
-                        int index = Config.RAND.nextInt(neighborBonds.size());
-                        neighborBonds.set(index, possibleBonds.get(Config.RAND.nextInt(possibleBonds.size())));
-                    } else {
-                        if (neighborBonds.size() < possibleBonds.size()) {
-                            neighborBonds.add(possibleBonds.get(Config.RAND.nextInt(possibleBonds.size())));
-                        }
-                    }
-                    FoldingPathway neighborPathway = new FoldingPathway(neighborBonds);
-
-                    double deltaFitness = neighborPathway.getFitness() - currentPathway.getFitness();
-                    if (deltaFitness > 0 || Config.RAND.nextDouble() < Math.exp(deltaFitness / temperature)) {
-                        currentPathway = neighborPathway;
-                        mutationTree.addPathway(neighborPathway, currentPathway, "Annealing");
-                    }
-                    if (currentPathway.getFitness() > bestPathway.getFitness()) {
-                        bestPathway = currentPathway;
-                    }
-                    temperature *= coolingRate;
-                }
-                return bestPathway;
-            }));
-        }
-
-        List<FoldingPathway> population = new ArrayList<>();
-        for (Future<FoldingPathway> future : futures) {
-            try {
-                population.add(future.get());
-            } catch (InterruptedException | ExecutionException e) {
-                throw new DNAProcessingException("Parallel simulated annealing failed: " + e.getMessage());
-            }
-        }
-        normalizeFitness(population); // Gauss: Normalize fitness
-        computeCompositeScore(population, calculateFoldingEntropy(population)); // Advanced scoring
-        // Note: Could be extended with GPU (e.g., CUDA/OpenCL) for thousands of pathways
-        return population;
-    }
-
-    private FoldingPathway crossover(FoldingPathway parent1, FoldingPathway parent2) {
-        List<ProteinBond> childBonds = new ArrayList<>();
-        int split = Config.RAND.nextInt(Math.min(parent1.getBonds().size(), parent2.getBonds().size()));
-        childBonds.addAll(parent1.getBonds().subList(0, split));
-        childBonds.addAll(parent2.getBonds().subList(split, parent2.getBonds().size()));
-        return new FoldingPathway(childBonds);
-    }
-
-    private FoldingPathway mutate(FoldingPathway pathway, List<ProteinBond> possibleBonds) {
-        List<ProteinBond> bonds = new ArrayList<>(pathway.getBonds());
-        if (!bonds.isEmpty()) {
-            int index = Config.RAND.nextInt(bonds.size());
-            bonds.set(index, possibleBonds.get(Config.RAND.nextInt(possibleBonds.size())));
-        }
-        return new FoldingPathway(bonds);
-    }
-
-    private List<ProteinBond> computePossibleBonds(List<AminoAcid> aminoAcids) {
-        List<ProteinBond> bonds = new ArrayList<>();
-        for (int i = 0; i < aminoAcids.size(); i++) {
-            for (int j = i + 1; j < aminoAcids.size(); j++) {
-                double energy = Config.RAND.nextDouble() * Config.BOND_ENERGY_THRESHOLD;
-                String direction = Config.RAND.nextDouble() < 0.5 ? "L" : "R"; // Noether: Assign L/R
-                bonds.add(new ProteinBond(aminoAcids.get(i), aminoAcids.get(j), energy, direction));
-            }
-        }
-        return bonds;
     }
 
     // Pevzner: Dynamic programming for mass spectrometry or FASTA sequence inference
