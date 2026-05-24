@@ -1,0 +1,13 @@
+target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+*.log
+resources/dna_export.fasta
+resources/virus_state.vrs
+resources/virology_stats.json
+resources/virology_stats_pathways.json
+.DS_Store
