@@ -1,6 +1,6 @@
 package com.xai.dnareplicator.view;
 
-import com.xai.dnareplicator.controller.ViewUpdater;
+import com.xai.dnareplicator.presentation.contract.SimulationViewPort;
 import com.xai.dnareplicator.model.Cell;
 import com.xai.dnareplicator.model.DNAFragment;
 import com.xai.dnareplicator.model.Protein;
@@ -31,7 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 
 @Component
-public class SimulationView implements ViewUpdater {
+public class SimulationView implements SimulationViewPort {
     private Pane root;
     private Label statusLabel;
     private Label levelLabel;

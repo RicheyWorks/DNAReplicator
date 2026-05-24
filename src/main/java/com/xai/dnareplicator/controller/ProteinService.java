@@ -5,8 +5,9 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.xai.dnareplicator.model.Protein;
 import com.xai.dnareplicator.model.SimulationSession;
 import com.xai.dnareplicator.config.Config;
-import com.xai.dnareplicator.controller.ViewUpdater;
 import com.xai.dnareplicator.controller.DNAProcessingException;
+import com.xai.dnareplicator.presentation.contract.SimulationViewPort;
+import com.xai.dnareplicator.presentation.javafx.JavaFxExecutor;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -15,7 +16,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
-import javafx.application.Platform;
 import javafx.concurrent.Task;
 
 import org.springframework.stereotype.Component;
@@ -23,7 +23,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class ProteinService {
     private final List<Protein> proteins;
-    private final ViewUpdater viewUpdater;
+    private final SimulationViewPort viewPort;
+    private final JavaFxExecutor javaFxExecutor;
     private final ObjectMapper objectMapper;
     private SplayTree aminoAcidTree; // CLRS Chapter 17: Splay tree for amino acids
     private HMM foldingHMM; // Durbin: HMM for folding states
@@ -478,7 +479,7 @@ public class ProteinService {
 
         public void visualize() {
             // Placeholder: Visualize tree in SimulationView
-            // viewUpdater.visualizeMutationTree(root);
+            // viewPort.visualizeMutationTree(root);
         }
     }
 
@@ -649,9 +650,16 @@ public class ProteinService {
         }
     }
 
-    public ProteinService(SimulationSession session, ViewUpdater viewUpdater, ObjectMapper objectMapper) {
-        if (viewUpdater == null) {
-            throw new IllegalArgumentException("ViewUpdater cannot be null");
+    public ProteinService(
+            SimulationSession session,
+            SimulationViewPort viewPort,
+            JavaFxExecutor javaFxExecutor,
+            ObjectMapper objectMapper) {
+        if (viewPort == null) {
+            throw new IllegalArgumentException("SimulationViewPort cannot be null");
+        }
+        if (javaFxExecutor == null) {
+            throw new IllegalArgumentException("JavaFxExecutor cannot be null");
         }
         if (session == null) {
             throw new IllegalArgumentException("SimulationSession cannot be null");
@@ -660,7 +668,8 @@ public class ProteinService {
             throw new IllegalArgumentException("ObjectMapper cannot be null");
         }
         this.proteins = session.getProteins();
-        this.viewUpdater = viewUpdater;
+        this.viewPort = viewPort;
+        this.javaFxExecutor = javaFxExecutor;
         this.objectMapper = objectMapper.copy().enable(SerializationFeature.INDENT_OUTPUT);
         this.aminoAcidTree = new SplayTree();
         this.foldingHMM = new HMM();
@@ -671,11 +680,11 @@ public class ProteinService {
     // Protein folding with CLRS approximation, HMM, genetic algorithm, simulated annealing, and mutation tree
     public void foldProteins() throws DNAProcessingException {
         if (proteins.isEmpty()) {
-            viewUpdater.updateStatus("No proteins to fold!");
+            viewPort.updateStatus("No proteins to fold!");
             return;
         }
 
-        viewUpdater.updateStatus("Folding proteins...");
+        viewPort.updateStatus("Folding proteins...");
         Task<Void> foldingTask = new Task<>() {
             @Override
             protected Void call() {
@@ -683,25 +692,25 @@ public class ProteinService {
                 while (foldingProgress < 1) {
                     foldingProgress += 0.01;
                     final double progress = foldingProgress;
-                    Platform.runLater(() -> {
-                        viewUpdater.showFoldingProgress(progress);
+                    javaFxExecutor.runLater(() -> {
+                        viewPort.showFoldingProgress(progress);
                         for (Protein protein : proteins) {
-                            viewUpdater.animateProteinFolding(protein, progress);
+                            viewPort.animateProteinFolding(protein, progress);
                         }
                     });
                     try {
                         Thread.sleep(50);
                     } catch (InterruptedException e) {
-                        viewUpdater.updateStatus("Folding interrupted: " + e.getMessage());
+                        viewPort.updateStatus("Folding interrupted: " + e.getMessage());
                         return null;
                     }
                 }
 
-                Platform.runLater(() -> {
+                javaFxExecutor.runLater(() -> {
                     try {
                         for (Protein protein : proteins) {
                             if (protein == null) {
-                                viewUpdater.updateStatus("Skipping null protein!");
+                                viewPort.updateStatus("Skipping null protein!");
                                 continue;
                             }
                             // Initialize amino acids (Pevzner: Mass spectrometry or FASTA)
@@ -772,7 +781,7 @@ public class ProteinService {
                             // Combine all results
                             if (approxSuccess && noetherSuccess && hmmSuccess && gaSuccess && saSuccess && mctsSuccess && entropySuccess && cspSuccess && kcSuccess && randomSuccess) {
                                 protein.fold();
-                                viewUpdater.updateStatus("Protein " + protein.getEnzymeType() + " folded as " + foldingState);
+                                viewPort.updateStatus("Protein " + protein.getEnzymeType() + " folded as " + foldingState);
                                 successfulPathways.add(gaPathway);
                                 successfulPathways.add(saPathway);
                                 saveSuccessfulPathways(); // ML: Save pathways
@@ -782,19 +791,19 @@ public class ProteinService {
                                 chaperoneLevel = Math.max(0.5, chaperoneLevel * 0.95); // Alon
                             } else {
                                 protein.failFold();
-                                viewUpdater.updateStatus("Protein " + protein.getEnzymeType() + " failed to fold!");
+                                viewPort.updateStatus("Protein " + protein.getEnzymeType() + " failed to fold!");
                                 mutationTree.addPathway(gaPathway, null, "FailedFold");
                                 mutationTree.addPathway(saPathway, gaPathway, "Annealing");
                                 chaperoneLevel = Math.min(1.5, chaperoneLevel * 1.05); // Alon
                             }
                             mutationTree.visualize();
-                            viewUpdater.updateProtein(protein, protein.getX(), protein.getY(), protein.isFolded(), protein.isFoldFailed());
+                            viewPort.updateProtein(protein, protein.getX(), protein.getY(), protein.isFolded(), protein.isFoldFailed());
                         }
-                        viewUpdater.hideFoldingProgress();
+                        viewPort.hideFoldingProgress();
                         long foldedCount = proteins.stream().filter(p -> p != null && p.isFolded()).count();
-                        viewUpdater.updateStatus("Protein folding complete! " + foldedCount + " folded correctly.");
+                        viewPort.updateStatus("Protein folding complete! " + foldedCount + " folded correctly.");
                     } catch (DNAProcessingException e) {
-                        viewUpdater.updateStatus("Folding failed: " + e.getMessage());
+                        viewPort.updateStatus("Folding failed: " + e.getMessage());
                     }
                 });
                 return null;
@@ -1165,7 +1174,7 @@ for (int i = newPopulation.size(); i < populationSize; i++) {
             }
             return sequence.toString();
         } catch (java.io.IOException e) {
-            viewUpdater.updateStatus("Failed to read FASTA file: " + e.getMessage());
+            viewPort.updateStatus("Failed to read FASTA file: " + e.getMessage());
             return null;
         }
     }
@@ -1203,7 +1212,7 @@ for (int i = newPopulation.size(); i < populationSize; i++) {
                     new File(Config.getStatsFilePath() + "_pathways.json"),
                     pathwaysArray);
         } catch (IOException e) {
-            viewUpdater.updateStatus("Failed to save successful pathways: " + e.getMessage());
+            viewPort.updateStatus("Failed to save successful pathways: " + e.getMessage());
         }
     }
 }
